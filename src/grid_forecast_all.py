@@ -4,7 +4,7 @@
 # 功能说明
 #   1. 调用海天气象网格预报 API，获取当前支持的 21 个气象变量。
 #   2. 校验返回的经纬度和二维网格数据，并屏蔽 -9999 缺测值。
-#   3. 绘制中国区域多变量填色等值图，叠加省界、海岸线、省名、省会、
+#   3. 绘制中国区域多变量填色等值图，叠加省界、海岸线、省名、
 #      经纬网和等值线；为每个变量标注中英文名称、单位及色标。
 #   4. 输出高分辨率 PNG。若本地没有省界缓存，会下载并缓存到
 #      data/china_provinces.geojson。
@@ -14,29 +14,15 @@
 #   风速及风向、阵风、降水、降雪、云量、能见度、WMO 天气代码，以及
 #   短波、直接、散射、直接法向和地球长波辐射。
 #
-# 时间与参数
-#   --time   必填，API 预报时次，格式 YYYYMMDDHH，须在未来 10 日内。
-#   --output 可选，图片输出路径；默认写入
-#            figures/china_weather_all_<time>.png。
-#   图片中的起报时间自动设为运行日的前一日 20:00（北京时间）；预报时间
-#   显示 --time 对应的 API 参数时次。
-#
-# 运行方法（在项目根目录的 PowerShell 中执行）
-#   python -m venv .venv
-#   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-#   $env:HTMETEO_API_KEY = "<你的 API Key>"
-#   .\.venv\Scripts\python.exe src\grid_forecast.py --time 2026111918
-#   .\.venv\Scripts\python.exe src\grid_forecast.py --time 2026111918 --output figures\china_weather_all_2026111918.png
-#
-# 将示例时次替换为未来 10 日内需要查询的 YYYYMMDDHH；API Key 通过环境变量
-# 提供，不要直接写入或提交到源代码。
+# 使用方法
+#   数据源：ECMWF 由海天气象提供 API 支持：https://htqx.cn/
+#   直接在下方大写常量区修改 API_KEY、FORECAST_TIME 与 OUTPUT_DIR，
+#   然后运行本脚本即可（无需传入命令行参数）。
 # =============================================================================
-"""Fetch and visualize all HtMeteo national 0.1-degree forecast variables."""
+"""获取海天气象全国 0.1° 网格预报数据并绘制多变量填色等值线图。"""
 
-import argparse
 import concurrent.futures
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,13 +31,18 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import requests
-from matplotlib.collections import LineCollection
-from matplotlib.colors import (
-    BoundaryNorm,
-    ListedColormap,
-)
 from matplotlib import patheffects
+from matplotlib.collections import LineCollection
+from matplotlib.colors import BoundaryNorm, LinearSegmentedColormap, ListedColormap
 
+# =============================================================================
+# 用户运行参数常量（请根据需要手动修改）
+# =============================================================================
+# API_KEY = os.getenv("HTMETEO_API_KEY", "").strip()
+
+API_KEY = "2js7rY7j89JgbNH76Ggh7TF5r6"  # 请在海天气象个人中心查看26位 API Key：https://htqx.cn/
+FORECAST_TIME = "2026112812"  # 格式 YYYYMMDDHH，须在未来 10 日内
+OUTPUT_DIR = Path(__file__).resolve().parents[1] / "figures"
 
 API_URL = "https://htqx.cn/meteo/api/forecast/grid"
 BOUNDARY_URL = "https://geo.datav.aliyun.com/areas_v3/bound/100000_full.json"
@@ -92,41 +83,41 @@ VARIABLES = {
     ),
 }
 
-PROVINCE_CAPITALS = {
-    110000: ("北京", "北京", 116.4074, 39.9042),
-    120000: ("天津", "天津", 117.2000, 39.0842),
-    130000: ("河北", "石家庄", 114.5149, 38.0428),
-    140000: ("山西", "太原", 112.5489, 37.8706),
-    150000: ("内蒙古", "呼和浩特", 111.7490, 40.8426),
-    210000: ("辽宁", "沈阳", 123.4315, 41.8057),
-    220000: ("吉林", "长春", 125.3235, 43.8171),
-    230000: ("黑龙江", "哈尔滨", 126.5350, 45.8038),
-    310000: ("上海", "上海", 121.4737, 31.2304),
-    320000: ("江苏", "南京", 118.7969, 32.0603),
-    330000: ("浙江", "杭州", 120.1551, 30.2741),
-    340000: ("安徽", "合肥", 117.2272, 31.8206),
-    350000: ("福建", "福州", 119.2965, 26.0745),
-    360000: ("江西", "南昌", 115.8582, 28.6829),
-    370000: ("山东", "济南", 117.1201, 36.6512),
-    410000: ("河南", "郑州", 113.6254, 34.7466),
-    420000: ("湖北", "武汉", 114.3054, 30.5931),
-    430000: ("湖南", "长沙", 112.9388, 28.2282),
-    440000: ("广东", "广州", 113.2644, 23.1291),
-    450000: ("广西", "南宁", 108.3669, 22.8170),
-    460000: ("海南", "海口", 110.1999, 20.0440),
-    500000: ("重庆", "重庆", 106.5516, 29.5630),
-    510000: ("四川", "成都", 104.0665, 30.5723),
-    520000: ("贵州", "贵阳", 106.6302, 26.6470),
-    530000: ("云南", "昆明", 102.8329, 24.8801),
-    540000: ("西藏", "拉萨", 91.1322, 29.6604),
-    610000: ("陕西", "西安", 108.9398, 34.3416),
-    620000: ("甘肃", "兰州", 103.8343, 36.0611),
-    630000: ("青海", "西宁", 101.7782, 36.6171),
-    640000: ("宁夏", "银川", 106.2309, 38.4872),
-    650000: ("新疆", "乌鲁木齐", 87.6168, 43.8256),
-    710000: ("台湾", "台北", 121.5654, 25.0330),
-    810000: ("香港", "香港", 114.1694, 22.3193),
-    820000: ("澳门", "澳门", 113.5439, 22.1987),
+PROVINCE_NAMES = {
+    110000: "北京",
+    120000: "天津",
+    130000: "河北",
+    140000: "山西",
+    150000: "内蒙古",
+    210000: "辽宁",
+    220000: "吉林",
+    230000: "黑龙江",
+    310000: "上海",
+    320000: "江苏",
+    330000: "浙江",
+    340000: "安徽",
+    350000: "福建",
+    360000: "江西",
+    370000: "山东",
+    410000: "河南",
+    420000: "湖北",
+    430000: "湖南",
+    440000: "广东",
+    450000: "广西",
+    460000: "海南",
+    500000: "重庆",
+    510000: "四川",
+    520000: "贵州",
+    530000: "云南",
+    540000: "西藏",
+    610000: "陕西",
+    620000: "甘肃",
+    630000: "青海",
+    640000: "宁夏",
+    650000: "新疆",
+    710000: "台湾",
+    810000: "香港",
+    820000: "澳门",
 }
 
 WEATHER_CODE_BOUNDS = [-0.5, 0.5, 3.5, 48.5, 57.5, 67.5, 77.5, 82.5, 86.5, 99.5]
@@ -142,6 +133,98 @@ WEATHER_CODE_LABELS = [
     "阵雪",
     "雷暴",
 ]
+
+# 现代极简高活力自定义色板
+VIBRANT_WEATHER_COLORS = [
+    "#FFD60A",  # 晴 - 明亮阳光黄
+    "#7DD3FC",  # 多云 - 清透天蓝
+    "#E2E8F0",  # 雾 - 柔亮云雾灰白
+    "#38BDF8",  # 毛毛雨 - 鲜亮水蓝
+    "#0284C7",  # 降雨 - 活力蔚蓝
+    "#A855F7",  # 降雪 - 明快电光紫
+    "#06B6D4",  # 阵雨 - 动感青蓝
+    "#EC4899",  # 阵雪 - 鲜艳玫粉
+    "#F97316",  # 雷暴 - 炽热活力橙
+]
+
+TEMP_CMAP = LinearSegmentedColormap.from_list(
+    "vibrant_temp",
+    [
+        "#1D4ED8",  # 强冷钴蓝
+        "#0284C7",  # 活力蓝
+        "#22D3EE",  # 明亮青
+        "#F8FAFC",  # 零度/中性极简白
+        "#FACC15",  # 暖阳黄
+        "#FB923C",  # 活力橙
+        "#EF4444",  # 热情红
+        "#BE123C",  # 高温玫红
+    ],
+    N=256,
+)
+
+PRECIP_CMAP = LinearSegmentedColormap.from_list(
+    "vibrant_precip",
+    [
+        "#F8FAFC",  # 极简净白
+        "#BAE6FD",  # 浅天蓝
+        "#38BDF8",  # 明亮水蓝
+        "#2563EB",  # 活力宝蓝
+        "#7C3AED",  # 电光紫
+        "#EC4899",  # 鲜艳洋红
+        "#F97316",  # 强降水橙
+    ],
+    N=256,
+)
+
+HUMIDITY_CMAP = LinearSegmentedColormap.from_list(
+    "vibrant_humidity",
+    [
+        "#FEF3C7",  # 干燥暖浅黄
+        "#67E8F9",  # 清新青
+        "#38BDF8",  # 活力天蓝
+        "#2563EB",  # 亮蓝
+        "#4F46E5",  # 饱和靛蓝
+    ],
+    N=256,
+)
+
+WIND_SPEED_CMAP = LinearSegmentedColormap.from_list(
+    "vibrant_wind",
+    [
+        "#F0FDF4",  # 微风浅薄荷
+        "#34D399",  # 清新翠绿
+        "#FACC15",  # 活力黄
+        "#FB923C",  # 动感橙
+        "#F43F5E",  # 强风珊瑚红
+        "#9333EA",  # 疾风紫
+    ],
+    N=256,
+)
+
+RADIATION_CMAP = LinearSegmentedColormap.from_list(
+    "vibrant_radiation",
+    [
+        "#EEF2FF",  # 极简浅靛白
+        "#93C5FD",  # 晨光蓝
+        "#FDE047",  # 明亮日照黄
+        "#FB923C",  # 暖橙
+        "#EF4444",  # 强辐射红
+    ],
+    N=256,
+)
+
+GENERAL_CMAP = LinearSegmentedColormap.from_list(
+    "vibrant_general",
+    [
+        "#06B6D4",  # 鲜亮青
+        "#10B981",  # 活力绿
+        "#FACC15",  # 明黄
+        "#F97316",  # 活力橙
+        "#EC4899",  # 亮玫红
+        "#8B5CF6",  # 活力紫
+    ],
+    N=256,
+)
 
 
 @dataclass
@@ -364,9 +447,7 @@ def variable_unit(variable: str, grid: GridForecast) -> str:
     return VARIABLES[variable][2]
 
 
-def variable_style(
-    variable: str, values: np.ma.MaskedArray
-) -> PlotStyle:
+def variable_style(variable: str, values: np.ma.MaskedArray) -> PlotStyle:
     category = VARIABLES[variable][3]
     valid = values.compressed()
     if valid.size == 0:
@@ -374,7 +455,7 @@ def variable_style(
 
     if category == "weather_code":
         levels = np.asarray(WEATHER_CODE_BOUNDS, dtype=float)
-        cmap = ListedColormap(plt.get_cmap("viridis", len(levels) - 1).colors)
+        cmap = ListedColormap(VIBRANT_WEATHER_COLORS)
         return PlotStyle(
             levels,
             cmap,
@@ -387,7 +468,8 @@ def variable_style(
 
     if category == "wind_direction":
         levels = np.linspace(0, 360, 13)
-        cmap = plt.get_cmap("twilight_shifted", len(levels) - 1)
+        hsv_cmap = plt.get_cmap("hsv")
+        cmap = ListedColormap(hsv_cmap(np.linspace(0, 1, len(levels) - 1, endpoint=False)))
         return PlotStyle(
             levels,
             cmap,
@@ -402,8 +484,8 @@ def variable_style(
         limit = max(abs(float(valid.min())), abs(float(valid.max())))
         if limit == 0:
             limit = 1
-        levels = np.linspace(-limit, limit, 13)
-        cmap = plt.get_cmap("coolwarm", len(levels) + 1)
+        levels = np.linspace(-limit, limit, 15)
+        cmap = ListedColormap(TEMP_CMAP(np.linspace(0.04, 0.96, len(levels) + 1)))
         return PlotStyle(
             levels,
             cmap,
@@ -419,7 +501,7 @@ def variable_style(
             [0, 0.1, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 200],
             dtype=float,
         )
-        cmap = plt.get_cmap("viridis", len(levels))
+        cmap = ListedColormap(PRECIP_CMAP(np.linspace(0.05, 0.98, len(levels))))
         return PlotStyle(
             levels,
             cmap,
@@ -432,7 +514,7 @@ def variable_style(
 
     if category == "humidity":
         levels = np.linspace(0, 100, 11)
-        cmap = plt.get_cmap("viridis", len(levels) - 1)
+        cmap = ListedColormap(HUMIDITY_CMAP(np.linspace(0.06, 0.96, len(levels) - 1)))
         return PlotStyle(
             levels,
             cmap,
@@ -443,12 +525,19 @@ def variable_style(
             [20, 40, 60, 80],
         )
 
+    if category == "wind_speed":
+        source_cmap = WIND_SPEED_CMAP
+    elif category == "radiation":
+        source_cmap = RADIATION_CMAP
+    else:
+        source_cmap = GENERAL_CMAP
+
     vmin = float(np.percentile(valid, 1))
     vmax = float(np.percentile(valid, 99))
     if vmax <= vmin:
         vmax = vmin + 1
-    levels = np.linspace(vmin, vmax, 11)
-    cmap = plt.get_cmap("viridis", len(levels) + 1)
+    levels = np.linspace(vmin, vmax, 13)
+    cmap = ListedColormap(source_cmap(np.linspace(0.05, 0.96, len(levels) + 1)))
     return PlotStyle(
         levels,
         cmap,
@@ -465,16 +554,24 @@ def draw_boundaries(
     features: list[dict[str, Any]],
     segments: list[np.ndarray],
 ) -> None:
+    # 现代极简边界线：清晰利落的深 Slate 色
     axes.add_collection(
         LineCollection(
             segments,
-            colors="#37474f",
-            linewidths=0.28,
+            colors="#334155",
+            linewidths=0.5,
             alpha=0.88,
             zorder=4,
         )
     )
-    text_effect = [patheffects.withStroke(linewidth=0.55, foreground="white", alpha=0.9)]
+    text_effect = [patheffects.withStroke(linewidth=0.5, foreground="white", alpha=0.85)]
+    # 极简半透明省名背景，仅保留省名避免压盖
+    province_box = {
+        "boxstyle": "round,pad=0.14",
+        "facecolor": "white",
+        "edgecolor": "none",
+        "alpha": 0.28,
+    }
 
     for feature in features:
         properties = feature.get("properties") or {}
@@ -482,45 +579,23 @@ def draw_boundaries(
             adcode = int(properties.get("adcode"))
         except (TypeError, ValueError):
             continue
-        province_capital = PROVINCE_CAPITALS.get(adcode)
-        if province_capital is None:
+        province = PROVINCE_NAMES.get(adcode)
+        if province is None:
             continue
 
-        province, capital, capital_lon, capital_lat = province_capital
         centroid = feature_centroid(feature)
         if centroid is not None:
             axes.text(
                 centroid[0],
                 centroid[1],
                 province,
-                fontsize=2.8,
-                color="#263238",
+                fontsize=3.6,
+                fontweight="bold",
+                color="#0F172A",
                 ha="center",
                 va="center",
+                bbox=province_box,
                 zorder=5,
-                path_effects=text_effect,
-            )
-        axes.plot(
-            capital_lon,
-            capital_lat,
-            marker="o",
-            markersize=1.5,
-            color="#1b2631",
-            markeredgecolor="white",
-            markeredgewidth=0.35,
-            zorder=6,
-        )
-        if capital != province:
-            axes.annotate(
-                capital,
-                (capital_lon, capital_lat),
-                xytext=(2, 2),
-                textcoords="offset points",
-                fontsize=2.6,
-                color="#17202a",
-                ha="left",
-                va="bottom",
-                zorder=6,
                 path_effects=text_effect,
             )
 
@@ -546,12 +621,13 @@ def plot_all_grids(
 
     columns = 4
     rows = (len(VARIABLES) + columns - 1) // columns
-    figure = plt.figure(figsize=(26, rows * 4.5), facecolor="white")
+    figure = plt.figure(figsize=(26, rows * 4.7), facecolor="#F8FAFC")
     figure.suptitle(
         "中国未来10日全要素逐小时气象预报",
         fontsize=22,
         fontweight="bold",
-        y=0.982,
+        color="#0F172A",
+        y=0.984,
     )
     start_time = (datetime.now(timezone(timedelta(hours=8))) - timedelta(days=1)).replace(
         hour=20,
@@ -559,8 +635,13 @@ def plot_all_grids(
         second=0,
         microsecond=0,
     )
-    forecast_time = datetime.strptime(time, "%Y%m%d%H").strftime(
-        "预报时间：%Y年%m月%d日 %H时（API时间参数）"
+    forecast_dt = datetime.strptime(time, "%Y%m%d%H").replace(
+        tzinfo=timezone(timedelta(hours=8))
+    )
+    lead_hours = int((forecast_dt - start_time).total_seconds() // 3600)
+    lead_text = f"+{lead_hours}小时" if lead_hours >= 0 else f"{lead_hours}小时"
+    forecast_time = forecast_dt.strftime(
+        f"预报时间：%Y年%m月%d日 %H时（{lead_text}）"
     )
     title_details = (
         f"起报时间：{start_time:%Y年%m月%d日 %H时}（北京时间）"
@@ -569,49 +650,51 @@ def plot_all_grids(
     )
     figure.text(
         0.5,
-        0.963,
+        0.965,
         title_details,
         ha="center",
         fontsize=11,
-        color="#455a64",
+        color="#475569",
     )
     grid_spec = figure.add_gridspec(
         rows,
         columns,
         left=0.035,
         right=0.985,
-        top=0.95,
+        top=0.952,
         bottom=0.045,
-        hspace=0.2,
+        hspace=0.25,
         wspace=0.1,
     )
 
     for index, variable in enumerate(VARIABLES):
         row, column = divmod(index, columns)
         axes = figure.add_subplot(grid_spec[row, column])
+        axes.set_facecolor("#F8FAFC")
         axes.set_xlim(float(longitudes.min()), float(longitudes.max()))
         axes.set_ylim(float(latitudes.min()), float(latitudes.max()))
         axes.set_aspect(0.82)
         x_ticks = np.arange(75, 136, 15)
         y_ticks = np.arange(15, 56, 10)
         axes.set_xticks(x_ticks)
-        axes.set_xticklabels([f"{tick}°E" for tick in x_ticks], fontsize=4.5)
+        axes.set_xticklabels([f"{tick}°E" for tick in x_ticks], fontsize=4.5, color="#475569")
         axes.set_yticks(y_ticks)
-        axes.set_yticklabels([f"{tick}°N" for tick in y_ticks], fontsize=4.5)
-        axes.grid(color="white", linestyle="--", linewidth=0.35, alpha=0.48, zorder=3)
-        axes.tick_params(length=1.8, width=0.4, pad=1.5)
+        axes.set_yticklabels([f"{tick}°N" for tick in y_ticks], fontsize=4.5, color="#475569")
+        axes.grid(color="white", linestyle="--", linewidth=0.35, alpha=0.55, zorder=3)
+        axes.tick_params(length=1.8, width=0.4, pad=1.5, colors="#64748B")
         for spine in axes.spines.values():
             spine.set_linewidth(0.45)
-            spine.set_color("#546e7a")
+            spine.set_color("#CBD5E1")
 
         chinese_name, english_name, default_unit, _ = VARIABLES[variable]
         grid = grids.get(variable)
         unit = variable_unit(variable, grid) if grid else default_unit
         axes.set_title(
-            f"{chinese_name} · {unit}\n{english_name}",
-            fontsize=7,
-            pad=3,
-            color="#263238",
+            f"{chinese_name} ({english_name}) · {unit}",
+            fontsize=6.8,
+            fontweight="bold",
+            pad=3.5,
+            color="#0F172A",
         )
         if grid is None:
             draw_boundaries(axes, boundary_features, boundary_segments)
@@ -623,8 +706,8 @@ def plot_all_grids(
                 ha="center",
                 va="center",
                 fontsize=6,
-                color="#9b2c2c",
-                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.82},
+                color="#E11D48",
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85},
                 zorder=7,
             )
             continue
@@ -654,9 +737,9 @@ def plot_all_grids(
                 latitudes,
                 values,
                 levels=line_levels,
-                colors="#243447",
-                linewidths=0.28,
-                alpha=0.36,
+                colors="#0F172A",
+                linewidths=0.25,
+                alpha=0.24,
                 zorder=2,
             )
         draw_boundaries(axes, boundary_features, boundary_segments)
@@ -664,73 +747,58 @@ def plot_all_grids(
             filled,
             ax=axes,
             orientation="horizontal",
-            pad=0.032,
-            fraction=0.04,
+            pad=0.04,
+            fraction=0.038,
             aspect=32,
             ticks=style.ticks,
         )
-        colorbar.ax.tick_params(labelsize=4, length=1.5, width=0.35, pad=1)
+        colorbar.ax.tick_params(
+            labelsize=4, length=1.5, width=0.35, pad=1, colors="#475569"
+        )
         colorbar.outline.set_linewidth(0.4)
-        colorbar.ax.xaxis.set_label_position("top")
+        colorbar.outline.set_edgecolor("#CBD5E1")
+        colorbar.ax.xaxis.set_label_position("bottom")
         colorbar.set_label(
             f"[{unit}]",
-            fontsize=5,
-            labelpad=1,
+            fontsize=4.8,
+            color="#334155",
+            labelpad=1.5,
         )
         if style.tick_labels:
             colorbar.ax.set_xticklabels(style.tick_labels)
 
     figure.text(
         0.5,
-        0.018,
+        0.015,
         "数据源：ECMWF 由海天气象提供API支持：https://htqx.cn/",
         ha="center",
         fontsize=8,
-        color="#455a64",
+        color="#475569",
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output_path, dpi=250, facecolor="white")
+    figure.savefig(output_path, dpi=250, facecolor=figure.get_facecolor())
     plt.close(figure)
     return output_path
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Fetch all national 0.1-degree forecast variables and create a map panel."
-    )
-    parser.add_argument(
-        "--time",
-        required=True,
-        help="Forecast valid time in YYYYMMDDHH format, within the next 10 days.",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        help="Image output path (default: figures/china_weather_all_<time>.png).",
-    )
-    return parser.parse_args()
-
-
 def main() -> None:
-    args = parse_args()
-    if len(args.time) != 10 or not args.time.isdigit():
-        raise SystemExit("--time must contain exactly 10 digits in YYYYMMDDHH format.")
+    if not FORECAST_TIME or len(FORECAST_TIME) != 10 or not FORECAST_TIME.isdigit():
+        raise SystemExit("FORECAST_TIME must contain 10 digits in YYYYMMDDHH format.")
     try:
-        datetime.strptime(args.time, "%Y%m%d%H")
+        datetime.strptime(FORECAST_TIME, "%Y%m%d%H")
     except ValueError:
-        raise SystemExit("--time must be a valid date and hour in YYYYMMDDHH format.")
+        raise SystemExit(
+            "FORECAST_TIME must be a valid date and hour in YYYYMMDDHH format."
+        )
 
-    api_key = os.environ.get("HTMETEO_API_KEY")
-    if not api_key:
-        raise SystemExit("Set the HTMETEO_API_KEY environment variable before running.")
+    if not API_KEY or API_KEY == "你的_API_KEY":
+        raise SystemExit("Please set API_KEY in the constants section at the top.")
 
-    latitudes, longitudes, grids, errors = fetch_all_grids(args.time, api_key)
+    latitudes, longitudes, grids, errors = fetch_all_grids(FORECAST_TIME, API_KEY)
     boundary_features = load_boundary_features()
-    output_path = args.output or (
-        PROJECT_ROOT / "figures" / f"china_weather_all_{args.time}.png"
-    )
+    output_path = OUTPUT_DIR / f"china_weather_all_{FORECAST_TIME}.png"
     saved_path = plot_all_grids(
-        args.time,
+        FORECAST_TIME,
         latitudes,
         longitudes,
         grids,
